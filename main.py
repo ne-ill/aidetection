@@ -129,4 +129,4 @@ async def analyze(file: UploadFile = File(...), include_gps: bool = Form(False))
       card("Location (GPS)", "mod" if all(gps) else "none", [["GPS",
         (f"{gps[0]}, {gps[1]}" if include_gps else "Found but hidden (consent needed)") if all(gps) else "None embedded"]]),
     ]
-    return {"V": {"v": v, "c": c, "why": why}, "S": cards}
+    return {"V": {"v": v, "c": c, "why": why, "model_run": ai_score is not None}, "S": cards}
