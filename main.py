@@ -43,21 +43,28 @@ def ela(img: Image.Image, q=90):
     d = np.asarray(ImageChops.difference(rgb, Image.open(buf)).convert("L"), dtype=float)
     return float(d.mean()), float(d.std()), float(np.percentile(d, 99))
 
-def detector(data: bytes):
-    url = os.getenv("DETECTOR_URL")
+def detectors(data: bytes):
+    """Calls the detector service (CNNDetection, UniversalFakeDetect, TruFor). Returns dict or None."""
+    url = os.getenv("DETECTORS_URL")
     if not url: return None
     try:
-        h = {"Authorization": "Bearer " + os.environ["DETECTOR_TOKEN"]} if os.getenv("DETECTOR_TOKEN") else {}
-        r = requests.post(url, data=data, headers=h, timeout=60); r.raise_for_status(); out = r.json()
-        # expected: [{"label":"artificial","score":0.93}, ...]
-        ai = next((x["score"] for x in out if re.search("art|ai|fake|synth", x["label"], re.I)), None)
-        return ai
-    except Exception: return None
+        r = requests.post(url.rstrip("/") + "/detect", files={"file": ("image", data)},
+                          data={"trufor": os.getenv("RUN_TRUFOR", "false")}, timeout=240)
+        r.raise_for_status(); return r.json()
+    except Exception as e: return {"error": str(e)[:120]}
+
+def pct(d, k):
+    v = (d or {}).get(k)
+    if isinstance(v, dict) and "ai_prob" in v: return f"{v['ai_prob']:.0%}"
+    return "Unavailable" if v else "Not run"
 
 def card(t, s, rows=None, **kw): return {"t": t, "s": s, "rows": rows or [], **kw}
 
+@app.get("/")
+def root(): return {"service": "Provenance API", "docs": "/docs", "health": "/health"}
+
 @app.get("/health")
-def health(): return {"ok": True, "exiftool": bool(shutil.which("exiftool")), "detector": bool(os.getenv("DETECTOR_URL"))}
+def health(): return {"ok": True, "exiftool": bool(shutil.which("exiftool")), "detectors": bool(os.getenv("DETECTORS_URL"))}
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...), include_gps: bool = Form(False)):
@@ -72,7 +79,9 @@ async def analyze(file: UploadFile = File(...), include_gps: bool = Form(False))
     # AI markers
     trained = bool(re.search("trainedAlgorithmicMedia", txt)); sd = bool(re.search(r"parameters\x00?[\s\S]{0,40}(Steps:|Negative prompt)", txt))
     gens = [n for n, p in GENS if re.search(p, txt, re.I)]
-    ai_score = detector(data)
+    det = detectors(data)
+    cnn_p = ((det or {}).get('cnndetection') or {}).get('ai_prob'); ufd_p = ((det or {}).get('ufd') or {}).get('ai_prob')
+    tf = (det or {}).get('trufor') or {}; ai_score = max([p for p in (cnn_p, ufd_p) if p is not None], default=None)
     # provenance, editing
     c2 = c2pa_check(data, "." + (fmt or "jpg").lower()); c2_marker = bool(re.search("c2pa|jumb|contentauth", txt, re.I))
     tools = sorted({*re.findall(r'stEvt:softwareAgent="([^"]+)"', txt), *re.findall(r'xmp:CreatorTool(?:>|=")([^<"]+)', txt), *([soft] if soft else [])})
@@ -87,18 +96,19 @@ async def analyze(file: UploadFile = File(...), include_gps: bool = Form(False))
     em, es, ep = ela(img); ela_flag = ep > 25
     # verdict
     if trained or sd: v, c, why = "Likely AI-generated", 90, "Embedded metadata declares AI generation."
-    elif ai_score is not None and ai_score > .85: v, c, why = "Likely AI-generated", int(ai_score * 100), "The AI-image detector model scored this image highly."
+    elif (ufd_p or 0) > .85 or (cnn_p is not None and ufd_p is not None and min(cnn_p, ufd_p) > .7): v, c, why = "Likely AI-generated", int(max(cnn_p or 0, ufd_p or 0) * 100), "Research detector models scored this image as synthetic. These models can be wrong, especially on newer generators."
     elif gens: v, c, why = "Possibly AI-generated", 62, "A generator name appears in the file data."
     elif c2 and c2.get("present"): v, c, why = "Provenance present", 70, "A C2PA manifest was found; review its validation status."
     elif sc >= 2: v, c, why = "Likely screenshot", 66, "Several screenshot traits were found."
     elif editors: v, c, why = "Edited", 55, "Editing software is recorded: " + ", ".join(editors) + "."
     elif make and model: v, c, why = "Likely camera photo", 48, "Camera make and model present. Weak evidence: metadata can be forged."
     else: v, c, why = "Inconclusive", 18, "No decisive evidence. Stripped metadata is common and proves nothing either way."
-    if ai_score is None: why += " The AI-detector model was not run."
+    if ai_score is None: why += " The AI-detector models were not run."
     gps = (g("GPSLatitude"), g("GPSLongitude"))
     cards = [
-      card("AI detection evidence", "strong" if trained or sd else "mod" if gens or (ai_score or 0) > .5 else "na", [
-        ["Model-based detector", f"AI likelihood {ai_score:.0%}" if ai_score is not None else "Not run (set DETECTOR_URL)"],
+      card("AI detection evidence", "strong" if trained or sd else "mod" if gens or (ai_score or 0) > .5 else "weak" if ai_score is not None else "na", [
+        ["CNNDetection (ResNet-50)", f"{cnn_p:.0%} synthetic" if cnn_p is not None else "Not run"],
+        ["UniversalFakeDetect (CLIP)", f"{ufd_p:.0%} synthetic" if ufd_p is not None else "Not run"],
         ["Metadata AI markers", "IPTC trained-algorithmic-media flag" if trained else "Stable Diffusion parameters" if sd else "None found"],
         ["Possible generator", ", ".join(gens) or "No generator signature found"]]),
       card("Metadata findings", "mod" if make else "weak" if ex else "none",
@@ -113,9 +123,9 @@ async def analyze(file: UploadFile = File(...), include_gps: bool = Form(False))
         ["ELA mean / 99th pct", f"{em:.1f} / {ep:.0f}"], ["Screenshot signals", "; ".join(why_sc) or "None"]]),
       card("Editing history", "mod" if editors or hist else "none", [
         ["Software recorded", ", ".join(tools) or "None"], ["XMP edit history", "Present" if hist else "Not recorded"]]),
-      card("Manipulation investigation", "weak" if ela_flag else "na", [
+      card("Manipulation investigation", "mod" if tf.get("score", 0) > .5 else "weak" if ela_flag else "na", [
         ["Error-level analysis", "Uneven recompression error, worth a closer look" if ela_flag else "No strong ELA anomaly"],
-        ["Tamper localization model", "Not run"]]),
+        ["TruFor manipulation score", f"{tf['score']:.0%} (area flagged {tf['flagged_area']:.0%})" if "score" in tf else "Not run"]]),
       card("Location (GPS)", "mod" if all(gps) else "none", [["GPS",
         (f"{gps[0]}, {gps[1]}" if include_gps else "Found but hidden (consent needed)") if all(gps) else "None embedded"]]),
     ]
