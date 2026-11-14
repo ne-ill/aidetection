@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: provenance-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: "*"   # replace with your frontend URL after deploying
