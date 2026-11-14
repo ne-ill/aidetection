@@ -292,8 +292,8 @@ function sections(R,showGps){
   return S}
 const LBL={strong:'Strong',mod:'Moderate',weak:'Weak',none:'None found',na:'Not run'};
 function render(o){
-  const{V}=o,R=o.R;$('v').textContent=V.v;$('conf').textContent='Confidence '+V.c+'%';
-  $('cl').textContent=V.c<40?'Low':V.c<70?'Medium':'High';$('gi').style.left='calc('+V.c+'% - 2px)';$('expl').textContent=V.why;
+  const{V}=o,R=o.R;$('v').textContent=V.v;$('conf').textContent=V.model_run?'Confidence '+V.c+'%':'Metadata only · no AI model';
+  $('cl').textContent=V.model_run?(V.c<40?'Low':V.c<70?'Medium':'High'):'Not applicable';$('gi').style.left=V.model_run?'calc('+V.c+'% - 2px)':'-100px';$('expl').textContent=V.why;
   if(!o.S)o.S=sections(R,$('gps').checked);
   $('rep').innerHTML=o.S.map(s=>`<div class="card ${s.wide?'wide':''}"><h4>${s.t}<span class="tag s-${s.s}">${LBL[s.s]}</span></h4>${s.html||'<dl>'+s.rows.map(r=>`<dt>${esc(r[0])}</dt><dd>${esc(r[1])}</dd>`).join('')+'</dl>'}</div>`).join('');
   $('rep').classList.add('on');$('dl').disabled=$('cp').disabled=false;
